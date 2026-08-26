@@ -1,0 +1,4 @@
+module PrivateDisplay {
+    umbrella header "PrivateDisplay.h"
+    export *
+}
