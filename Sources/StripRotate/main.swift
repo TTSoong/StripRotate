@@ -341,17 +341,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         targetScreen = screen
         configureDimensions(for: screen)
-
-        guard createVirtualDisplay() else {
-            starting = false
-            showError("無法建立 \(virtualWidth)×\(virtualHeight) 虛擬螢幕。請重新啟動 Mac 後再試。")
-            return
-        }
-
-        createOutputWindow(on: screen)
-        statusMenuItem.title = "正在啟動畫面擷取…"
+        statusMenuItem.title = "正在建立虛擬螢幕…"
         Task { @MainActor [weak self] in
             guard let self else { return }
+            var displayCreated = false
+            for attempt in 0..<5 {
+                guard self.starting, self.shouldRun, self.sessionActive else { return }
+                if self.createVirtualDisplay(identityOffset: attempt) {
+                    displayCreated = true
+                    break
+                }
+                if attempt < 4 {
+                    self.statusMenuItem.title = "虛擬螢幕未就緒，重試 \(attempt + 2)/5…"
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                }
+            }
+
+            guard displayCreated else {
+                self.starting = false
+                self.stop()
+                self.showError("無法建立 \(self.virtualWidth)×\(self.virtualHeight) 虛擬螢幕，已自動重試 5 次。請重新啟動 Mac 後再試。")
+                return
+            }
+
+            guard let currentScreen = self.findTargetScreen() else {
+                self.starting = false
+                self.stop()
+                self.showError("建立虛擬螢幕後找不到原本選定的實體輸出螢幕。")
+                return
+            }
+            self.targetScreen = currentScreen
+            self.createOutputWindow(on: currentScreen)
+            self.statusMenuItem.title = "正在啟動畫面擷取…"
             if await self.startDisplayStream() {
                 self.starting = false
                 self.running = true
@@ -414,7 +435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         virtualHeight = targetWidth
     }
 
-    private func createVirtualDisplay() -> Bool {
+    private func createVirtualDisplay(identityOffset: Int = 0) -> Bool {
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.setDispatchQueue(.global(qos: .userInitiated))
         descriptor.name = "Strip Rotate \(virtualWidth)x\(virtualHeight)"
@@ -424,10 +445,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             width: 25.4 * Double(virtualWidth) / 100,
             height: 25.4 * Double(virtualHeight) / 100
         )
-        descriptor.productID = 0x4501
+        let identity = UInt32(identityOffset)
+        descriptor.productID = 0x4501 + identity
         descriptor.vendorID = 0x5352
-        descriptor.serialNum = 0x0001
-        descriptor.serialNumber = 0x0001
+        descriptor.serialNum = 0x0001 + identity
+        descriptor.serialNumber = 0x0001 + identity
         descriptor.redPrimary = CGPoint(x: 0.6797, y: 0.3203)
         descriptor.greenPrimary = CGPoint(x: 0.2559, y: 0.6983)
         descriptor.bluePrimary = CGPoint(x: 0.1494, y: 0.0557)

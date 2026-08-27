@@ -28,6 +28,7 @@ If multiple portrait external displays are connected, choose the target from the
 - Optional launch at login.
 - Recovers after sleep, display reconfiguration, and interrupted capture.
 - Suspends the physical output overlay while the macOS session is locked, then safely restores it after unlock.
+- Retries virtual-display creation with fallback identities when WindowServer is still recovering after login or unlock.
 - Cursor guard prevents the pointer from entering the physical output desktop.
 
 ## Privacy permission reset
