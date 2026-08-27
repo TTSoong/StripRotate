@@ -23,6 +23,7 @@ CLANG_MODULE_CACHE_PATH="$build_root/clang-cache" xcrun swiftc \
   -framework ServiceManagement
 
 cp "$script_dir/AppResources/Info.plist" "$app_path/Contents/Info.plist"
+xattr -cr "$app_path"
 # Keep a stable designated requirement across local rebuilds. Without this,
 # ad-hoc signing defaults to the binary CDHash and macOS treats every build as
 # a different app for privacy permissions.

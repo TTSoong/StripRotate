@@ -11,7 +11,7 @@ For example: `450×1920` physical display → `1920×450` virtual desktop.
 ## Download and install
 
 1. Download the latest `Strip-Rotate-macOS.zip` from [Releases](https://github.com/TTSoong/StripRotate/releases/latest).
-2. Unzip it and move `Strip Rotate.app` to `/Applications`.
+2. Unzip it and move `Strip Rotate.app` to **Applications**.
 3. Right-click the app and choose **Open** the first time.
 4. Allow **Screen & System Audio Recording**, quit the app completely, then reopen it.
 5. In **System Settings → Displays → Arrange**, place the `Strip Rotate WIDTHxHEIGHT` virtual display beside your main display. Move the physical portrait output away from the edge you normally cross.
@@ -27,6 +27,7 @@ If multiple portrait external displays are connected, choose the target from the
 - Remembers the selected target and display arrangement.
 - Optional launch at login.
 - Recovers after sleep, display reconfiguration, and interrupted capture.
+- Suspends the physical output overlay while the macOS session is locked, then safely restores it after unlock.
 - Cursor guard prevents the pointer from entering the physical output desktop.
 
 ## Privacy permission reset

@@ -47,6 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var outputKeeperTimer: Timer?
     private var cursorGuardEnabled = true
     private var lastSafeCursorPosition: CGPoint?
+    private var sessionActive = true
+    private var recoveryPendingAfterUnlock = false
     private var selectedTargetKey: String?
     private var targetWidth = 0
     private var targetHeight = 0
@@ -100,6 +102,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self,
             selector: #selector(reassertOutputAfterSystemTransition),
             name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(sessionDidResignActive),
+            name: NSWorkspace.sessionDidResignActiveNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(sessionDidBecomeActive),
+            name: NSWorkspace.sessionDidBecomeActiveNotification,
             object: nil
         )
         let defaults = UserDefaults.standard
@@ -264,7 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func screenParametersChanged() {
         updateTargetSelectionMenu()
-        guard running else { return }
+        guard running, sessionActive else { return }
         if let screen = findTargetScreen() {
             targetScreen = screen
             positionOutputWindow(on: screen)
@@ -276,11 +290,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func reassertOutputAfterSystemTransition() {
-        guard running else { return }
+        guard running, sessionActive else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            guard let self, self.running, let screen = self.findTargetScreen() else { return }
+            guard let self, self.running, self.sessionActive, let screen = self.findTargetScreen() else { return }
             self.targetScreen = screen
             self.positionOutputWindow(on: screen)
+        }
+    }
+
+    @objc private func sessionDidResignActive() {
+        sessionActive = false
+        recoveryWorkItem?.cancel()
+        recoveryWorkItem = nil
+        outputWindow?.orderOut(nil)
+    }
+
+    @objc private func sessionDidBecomeActive() {
+        sessionActive = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.shouldRun, self.sessionActive else { return }
+            let virtualDisplayOnline = self.virtualDisplay.map {
+                CGDisplayIsOnline($0.displayID) != 0
+            } ?? false
+            let healthy = self.running
+                && virtualDisplayOnline
+                && self.captureStream != nil
+                && self.findTargetScreen() != nil
+            if self.recoveryPendingAfterUnlock || !healthy {
+                self.recoveryPendingAfterUnlock = false
+                self.scheduleRecovery(reason: "登入完成，正在恢復顯示…")
+            } else {
+                self.reassertOutputAfterSystemTransition()
+            }
         }
     }
 
@@ -330,6 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func stop() {
         shouldRun = false
+        recoveryPendingAfterUnlock = false
         recoveryWorkItem?.cancel()
         layoutSaveWorkItem?.cancel()
         tearDownDisplayResources()
@@ -490,7 +532,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func keepOutputWindowVisible() {
-        guard running, let window = outputWindow else { return }
+        guard running, sessionActive, let window = outputWindow else { return }
         window.canHide = false
         window.hidesOnDeactivate = false
         if !window.isVisible {
@@ -501,7 +543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func performHealthCheck() {
         updatePreferenceMenuStates()
-        guard shouldRun, running else { return }
+        guard shouldRun, running, sessionActive else { return }
         guard
             let display = virtualDisplay,
             CGDisplayIsOnline(display.displayID) != 0,
@@ -520,7 +562,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func scheduleRecovery(reason: String) {
-        guard shouldRun, recoveryWorkItem == nil else { return }
+        guard shouldRun else { return }
+        guard sessionActive else {
+            recoveryPendingAfterUnlock = true
+            return
+        }
+        guard recoveryWorkItem == nil else { return }
         statusMenuItem.title = reason
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -597,6 +644,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard
             cursorGuardEnabled,
             running,
+            sessionActive,
             let targetID = targetScreen?.displayID,
             let event = CGEvent(source: nil)
         else { return }
