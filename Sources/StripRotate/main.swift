@@ -49,6 +49,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastSafeCursorPosition: CGPoint?
     private var sessionActive = true
     private var recoveryPendingAfterUnlock = false
+    private var wakeRecoveryWorkItem: DispatchWorkItem?
+    private var lastFrameTimestamp: TimeInterval = 0
+    private var firstFrameDeadline: TimeInterval?
     private var selectedTargetKey: String?
     private var targetWidth = 0
     private var targetHeight = 0
@@ -100,14 +103,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
-            selector: #selector(reassertOutputAfterSystemTransition),
+            selector: #selector(systemDidWake),
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(sessionDidResignActive),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(sessionDidResignActive),
+            name: NSWorkspace.screensDidSleepNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(systemDidWake),
+            name: NSWorkspace.screensDidWakeNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(sessionDidResignActive),
             name: NSWorkspace.sessionDidResignActiveNotification,
+            object: nil
+        )
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(sessionDidResignActive),
+            name: Notification.Name("com.apple.screenIsLocked"),
+            object: nil
+        )
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(sessionDidBecomeActive),
+            name: Notification.Name("com.apple.screenIsUnlocked"),
             object: nil
         )
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -299,14 +332,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func sessionDidResignActive() {
+        NSLog("Strip Rotate: session became inactive")
         sessionActive = false
+        recoveryPendingAfterUnlock = shouldRun
+        wakeRecoveryWorkItem?.cancel()
+        wakeRecoveryWorkItem = nil
         recoveryWorkItem?.cancel()
         recoveryWorkItem = nil
+        firstFrameDeadline = nil
         outputWindow?.orderOut(nil)
     }
 
     @objc private func sessionDidBecomeActive() {
+        NSLog("Strip Rotate: session became active")
         sessionActive = true
+        wakeRecoveryWorkItem?.cancel()
+        wakeRecoveryWorkItem = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self, self.shouldRun, self.sessionActive else { return }
             let virtualDisplayOnline = self.virtualDisplay.map {
@@ -323,6 +364,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.reassertOutputAfterSystemTransition()
             }
         }
+    }
+
+    @objc private func systemDidWake() {
+        NSLog("Strip Rotate: system or screens woke")
+        recoveryPendingAfterUnlock = shouldRun
+        scheduleUnlockCheck(attempt: 0)
+    }
+
+    private func scheduleUnlockCheck(attempt: Int) {
+        wakeRecoveryWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.shouldRun else { return }
+            if self.isSessionLocked(), attempt < 60 {
+                self.scheduleUnlockCheck(attempt: attempt + 1)
+            } else {
+                self.sessionDidBecomeActive()
+            }
+        }
+        wakeRecoveryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: workItem)
+    }
+
+    private func isSessionLocked() -> Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        if let locked = session["CGSSessionScreenIsLocked"] as? Bool {
+            return locked
+        }
+        return (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue ?? false
     }
 
     private func start() {
@@ -393,6 +462,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stop() {
         shouldRun = false
         recoveryPendingAfterUnlock = false
+        wakeRecoveryWorkItem?.cancel()
+        wakeRecoveryWorkItem = nil
         recoveryWorkItem?.cancel()
         layoutSaveWorkItem?.cancel()
         tearDownDisplayResources()
@@ -411,6 +482,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         outputLayer = nil
         virtualDisplay = nil
         targetScreen = nil
+        lastFrameTimestamp = 0
+        firstFrameDeadline = nil
         running = false
         starting = false
     }
@@ -566,6 +639,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func performHealthCheck() {
         updatePreferenceMenuStates()
         guard shouldRun, running, sessionActive else { return }
+        if let deadline = firstFrameDeadline,
+           Date.timeIntervalSinceReferenceDate > deadline {
+            NSLog("Strip Rotate: no frames arrived before the recovery deadline")
+            firstFrameDeadline = nil
+            scheduleRecovery(reason: "未收到畫面，正在重新啟動串流…")
+            return
+        }
         guard
             let display = virtualDisplay,
             CGDisplayIsOnline(display.displayID) != 0,
@@ -720,6 +800,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             try await stream.startCapture()
             captureStream = stream
+            lastFrameTimestamp = 0
+            firstFrameDeadline = Date.timeIntervalSinceReferenceDate + 10
             return true
         } catch {
             NSLog("Strip Rotate capture error: %@", String(describing: error))
@@ -764,7 +846,10 @@ extension AppDelegate: SCStreamOutput, SCStreamDelegate {
     ) {
         guard outputType == .screen, sampleBuffer.isValid else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let layer = self?.outputLayer else { return }
+            guard let self, self.captureStream === stream else { return }
+            self.lastFrameTimestamp = Date.timeIntervalSinceReferenceDate
+            self.firstFrameDeadline = nil
+            guard let layer = self.outputLayer else { return }
             let renderer = layer.sampleBufferRenderer
             if renderer.status == .failed {
                 renderer.flush()
