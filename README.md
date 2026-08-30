@@ -22,6 +22,7 @@ If multiple portrait external displays are connected, choose the target from the
 ## Features
 
 - Automatically detects external displays whose pixel height is greater than their width.
+- Waits silently when the selected display is disconnected and reconnects only after a macOS display-change event; no disconnected-state polling or repeated alerts.
 - Creates a matching virtual desktop with width and height swapped.
 - Supports clockwise and counterclockwise rotation.
 - Remembers the selected target and display arrangement.
@@ -30,6 +31,7 @@ If multiple portrait external displays are connected, choose the target from the
 - Suspends the physical output overlay while the macOS session is locked, then safely restores it after unlock.
 - Retries virtual-display creation with fallback identities when WindowServer is still recovering after login or unlock.
 - Rebuilds the capture pipeline after every lock/sleep cycle and verifies that the restarted stream actually produces a frame.
+- Defers saved-layout restoration until displays have settled and skips the WindowServer configuration transaction when the arrangement is already correct.
 - Cursor guard prevents the pointer from entering the physical output desktop.
 
 ## Privacy permission reset

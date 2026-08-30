@@ -40,8 +40,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var running = false
     private var starting = false
     private var shouldRun = true
+    private var waitingForTarget = false
     private var recoveryWorkItem: DispatchWorkItem?
+    private var displayReconnectWorkItem: DispatchWorkItem?
+    private var targetLossWorkItem: DispatchWorkItem?
     private var layoutSaveWorkItem: DispatchWorkItem?
+    private var layoutRestoreWorkItem: DispatchWorkItem?
     private var watchdogTimer: Timer?
     private var cursorTimer: Timer?
     private var outputKeeperTimer: Timer?
@@ -157,7 +161,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         selectedTargetKey = defaults.string(forKey: "selectedTargetKey")
         updatePreferenceMenuStates()
         updateTargetSelectionMenu()
-        startMonitoring()
         start()
     }
 
@@ -290,13 +293,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func selectTargetDisplay(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String, key != selectedTargetKey else { return }
-        let wasActive = running || starting
+        let shouldRestart = shouldRun || running || starting || waitingForTarget
         saveCurrentLayout()
         selectedTargetKey = key
         UserDefaults.standard.set(key, forKey: "selectedTargetKey")
         updateTargetSelectionMenu()
-        if wasActive {
-            stop()
+        if shouldRestart {
+            shouldRun = true
+            tearDownDisplayResources()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.start()
             }
@@ -311,14 +315,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func screenParametersChanged() {
         updateTargetSelectionMenu()
-        guard running, sessionActive else { return }
-        if let screen = findTargetScreen() {
-            targetScreen = screen
-            positionOutputWindow(on: screen)
-            scheduleLayoutSave()
-        } else {
-            statusMenuItem.title = "找不到選定的直向螢幕"
-            scheduleRecovery(reason: "等待實體螢幕重新連接…")
+        guard sessionActive else { return }
+
+        if running {
+            if let screen = findTargetScreen() {
+                targetLossWorkItem?.cancel()
+                targetLossWorkItem = nil
+                targetScreen = screen
+                positionOutputWindow(on: screen)
+                scheduleLayoutSave()
+            } else {
+                scheduleTargetLossCheck()
+            }
+            return
+        }
+
+        guard shouldRun, !starting else { return }
+        if findTargetScreen() != nil {
+            scheduleDisplayReconnect()
         }
     }
 
@@ -397,15 +411,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func start() {
         guard !running, !starting else { return }
         shouldRun = true
-        starting = true
         recoveryWorkItem?.cancel()
+        recoveryWorkItem = nil
+        displayReconnectWorkItem?.cancel()
+        displayReconnectWorkItem = nil
+        guard let screen = findTargetScreen() else {
+            enterWaitingForDisplay()
+            return
+        }
+
+        waitingForTarget = false
+        starting = true
         if !CGPreflightScreenCaptureAccess() {
             _ = CGRequestScreenCaptureAccess()
-        }
-        guard let screen = findTargetScreen() else {
-            starting = false
-            showError("找不到直向的外接螢幕。請確認長條螢幕已連接；若有多台，請從選單列的「輸出螢幕」選擇。")
-            return
         }
 
         targetScreen = screen
@@ -428,6 +446,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             guard displayCreated else {
                 self.starting = false
+                if self.findTargetScreen() == nil {
+                    self.enterWaitingForDisplay()
+                    return
+                }
                 self.stop()
                 self.showError("無法建立 \(self.virtualWidth)×\(self.virtualHeight) 虛擬螢幕，已自動重試 5 次。請重新啟動 Mac 後再試。")
                 return
@@ -435,8 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             guard let currentScreen = self.findTargetScreen() else {
                 self.starting = false
-                self.stop()
-                self.showError("建立虛擬螢幕後找不到原本選定的實體輸出螢幕。")
+                self.enterWaitingForDisplay()
                 return
             }
             self.targetScreen = currentScreen
@@ -447,12 +468,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.running = true
                 self.statusMenuItem.title = self.clockwise ? "運作中：順時針 90°" : "運作中：逆時針 90°"
                 self.startStopMenuItem.title = "停止旋轉輸出"
-                self.restoreSavedLayout()
+                self.startMonitoring()
+                self.scheduleLayoutRestore()
                 self.reassertOutputAfterSystemTransition()
                 self.scheduleLayoutSave(delay: 3)
                 self.showReadyInstructionsIfNeeded()
             } else {
                 self.starting = false
+                if self.findTargetScreen() == nil {
+                    self.enterWaitingForDisplay()
+                    return
+                }
                 self.stop()
                 self.showError("無法讀取虛擬螢幕畫面。請到「隱私權與安全性 → 螢幕與系統錄音」允許 Strip Rotate，然後重新開啟 App。")
             }
@@ -461,17 +487,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func stop() {
         shouldRun = false
+        waitingForTarget = false
         recoveryPendingAfterUnlock = false
         wakeRecoveryWorkItem?.cancel()
         wakeRecoveryWorkItem = nil
         recoveryWorkItem?.cancel()
+        displayReconnectWorkItem?.cancel()
+        targetLossWorkItem?.cancel()
         layoutSaveWorkItem?.cancel()
+        layoutRestoreWorkItem?.cancel()
         tearDownDisplayResources()
         statusMenuItem.title = "已停止"
         startStopMenuItem.title = "開始旋轉輸出"
     }
 
     private func tearDownDisplayResources() {
+        stopMonitoring()
         let stream = captureStream
         captureStream = nil
         Task {
@@ -486,6 +517,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         firstFrameDeadline = nil
         running = false
         starting = false
+    }
+
+    private func enterWaitingForDisplay() {
+        recoveryWorkItem?.cancel()
+        recoveryWorkItem = nil
+        displayReconnectWorkItem?.cancel()
+        displayReconnectWorkItem = nil
+        targetLossWorkItem?.cancel()
+        targetLossWorkItem = nil
+        layoutRestoreWorkItem?.cancel()
+        layoutRestoreWorkItem = nil
+        recoveryPendingAfterUnlock = false
+        tearDownDisplayResources()
+        waitingForTarget = true
+        statusMenuItem.title = "螢幕未連接"
+        startStopMenuItem.title = "重新尋找螢幕"
     }
 
     private func findTargetScreen() -> NSScreen? {
@@ -626,6 +673,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func stopMonitoring() {
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
+        cursorTimer?.invalidate()
+        cursorTimer = nil
+        outputKeeperTimer?.invalidate()
+        outputKeeperTimer = nil
+    }
+
+    private func scheduleTargetLossCheck() {
+        guard targetLossWorkItem == nil else { return }
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.targetLossWorkItem = nil
+            guard self.shouldRun, self.running, self.sessionActive else { return }
+            if self.findTargetScreen() == nil {
+                self.enterWaitingForDisplay()
+            }
+        }
+        targetLossWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
+    }
+
+    private func scheduleDisplayReconnect() {
+        guard displayReconnectWorkItem == nil else { return }
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.displayReconnectWorkItem = nil
+            guard self.shouldRun, !self.running, !self.starting, self.sessionActive else { return }
+            guard self.findTargetScreen() != nil else {
+                self.enterWaitingForDisplay()
+                return
+            }
+            self.start()
+        }
+        displayReconnectWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: workItem)
+    }
+
     private func keepOutputWindowVisible() {
         guard running, sessionActive, let window = outputWindow else { return }
         window.canHide = false
@@ -649,10 +735,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard
             let display = virtualDisplay,
             CGDisplayIsOnline(display.displayID) != 0,
-            captureStream != nil,
-            let screen = findTargetScreen()
+            captureStream != nil
         else {
             scheduleRecovery(reason: "顯示連線中斷，正在恢復…")
+            return
+        }
+        guard let screen = findTargetScreen() else {
+            enterWaitingForDisplay()
             return
         }
         targetScreen = screen
@@ -669,12 +758,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recoveryPendingAfterUnlock = true
             return
         }
+        guard findTargetScreen() != nil else {
+            enterWaitingForDisplay()
+            return
+        }
         guard recoveryWorkItem == nil else { return }
         statusMenuItem.title = reason
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.recoveryWorkItem = nil
             guard self.shouldRun else { return }
+            guard self.findTargetScreen() != nil else {
+                self.enterWaitingForDisplay()
+                return
+            }
             self.tearDownDisplayResources()
             self.start()
         }
@@ -688,6 +785,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.saveCurrentLayout()
         }
         layoutSaveWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func scheduleLayoutRestore(delay: TimeInterval = 2.5) {
+        layoutRestoreWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.running, self.sessionActive else { return }
+            self.layoutRestoreWorkItem = nil
+            self.restoreSavedLayout()
+        }
+        layoutRestoreWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
@@ -726,6 +834,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let virtualY = Int32(defaults.double(forKey: prefix("virtualOriginY")))
         let targetX = Int32(defaults.double(forKey: prefix("targetOriginX")))
         let targetY = Int32(defaults.double(forKey: prefix("targetOriginY")))
+
+        let currentVirtualOrigin = CGDisplayBounds(virtualID).origin
+        let currentTargetOrigin = CGDisplayBounds(targetID).origin
+        guard currentVirtualOrigin.x != CGFloat(virtualX)
+                || currentVirtualOrigin.y != CGFloat(virtualY)
+                || currentTargetOrigin.x != CGFloat(targetX)
+                || currentTargetOrigin.y != CGFloat(targetY)
+        else { return }
 
         var configuration: CGDisplayConfigRef?
         guard CGBeginDisplayConfiguration(&configuration) == .success, let configuration else { return }
