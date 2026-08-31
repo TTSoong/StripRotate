@@ -27,6 +27,7 @@ If multiple portrait external displays are connected, choose the target from the
 - Supports clockwise and counterclockwise rotation.
 - Remembers the selected target and display arrangement.
 - Optional launch at login.
+- Shows the installed app version and build number directly in the menu.
 - Recovers after sleep, display reconfiguration, and interrupted capture.
 - Suspends the physical output overlay while the macOS session is locked, then safely restores it after unlock.
 - Retries virtual-display creation with fallback identities when WindowServer is still recovering after login or unlock.
